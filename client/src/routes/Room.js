@@ -48,6 +48,8 @@ const Room = (props) => {
         socketRef.current = io.connect("/");
         navigator.mediaDevices.getUserMedia({ video: videoConstraints, audio: true }).then(stream => {
             userVideo.current.srcObject = stream;
+            // console.log('Obj: ', userVideo.current.srcObject.getTracks());
+            // userVideo.current.srcObject.getTracks()[0].stop();
             socketRef.current.emit("join room", roomID);
             socketRef.current.on("all users", users => {
                 const peers = [];
@@ -57,7 +59,10 @@ const Room = (props) => {
                         peerID: userID,
                         peer,
                     })
-                    peers.push(peer);
+                    peers.push({
+                        peerID: userID,
+                        peer,
+                    });
                 })
                 setPeers(peers);
             })
@@ -69,12 +74,28 @@ const Room = (props) => {
                     peer,
                 })
 
-                setPeers(users => [...users, peer]);
+                const peerObj = {
+                    peerID: payload.callerID,
+                    peer,
+                };
+
+                setPeers([...peersRef.current]);
+
             });
 
             socketRef.current.on("receiving returned signal", payload => {
                 const item = peersRef.current.find(p => p.peerID === payload.id);
                 item.peer.signal(payload.signal);
+            });
+
+            socketRef.current.on("user left", id => {
+                const peerObj = peersRef.current.find(p => p.peerID === id);
+                if (peerObj) {
+                    peerObj.peer.destroy();
+                }
+                const peers = peersRef.current.filter(p => p.peerID !== id);
+                peersRef.current = peers;
+                setPeers(peers);
             });
         })
     }, []);
@@ -114,7 +135,7 @@ const Room = (props) => {
             <StyledVideo muted ref={userVideo} autoPlay playsInline />
             {peers.map((peer, index) => {
                 return (
-                    <Video key={index} peer={peer} />
+                    <Video key={peer.peerID} peer={peer.peer} />
                 );
             })}
         </Container>
