@@ -1,145 +1,170 @@
-import React, { useEffect, useRef, useState } from "react";
-import io from "socket.io-client";
-import Peer from "simple-peer";
-import styled from "styled-components";
+import React, { useEffect, useRef, useState } from 'react';
+import io from 'socket.io-client';
+import Peer from 'simple-peer';
+import styled from 'styled-components';
+import EventEmitter from 'events';
 
 const Container = styled.div`
-    padding: 20px;
-    display: flex;
-    height: 100vh;
-    width: 90%;
-    margin: auto;
-    flex-wrap: wrap;
+  padding: 20px;
+  display: flex;
+  height: 100vh;
+  width: 90%;
+  margin: auto;
+  flex-wrap: wrap;
 `;
 
 const StyledVideo = styled.video`
-    height: 40%;
-    width: 50%;
+  height: 40%;
+  width: 50%;
 `;
 
-const Video = (props) => {
-    const ref = useRef();
+const Audio = (props) => {
+  const ref = useRef();
 
-    useEffect(() => {
-        props.peer.on("stream", stream => {
-            ref.current.srcObject = stream;
-        })
-    }, []);
+  useEffect(() => {
+    props.peer.on('stream', (stream) => {
+      ref.current.srcObject = stream;
+      ref.current.play();
+    });
+  }, []);
 
-    return (
-        <StyledVideo playsInline autoPlay ref={ref} />
-    );
-}
-
-
-const videoConstraints = {
-    height: window.innerHeight / 2,
-    width: window.innerWidth / 2
+  return <audio controls ref={ref} />;
 };
 
+const videoConstraints = {
+  height: window.innerHeight / 2,
+  width: window.innerWidth / 2,
+};
+
+const ee = new EventEmitter();
+
 const Room = (props) => {
-    const [peers, setPeers] = useState([]);
-    const socketRef = useRef();
-    const userVideo = useRef();
-    const peersRef = useRef([]);
-    const roomID = props.match.params.roomID;
+  const [peers, setPeers] = useState(new Map());
+  console.log('🚀 ~ file: Room.js ~ line 42 ~ Room ~ peers', peers);
+  const [wsInstance, setWsInstance] = useState();
 
-    useEffect(() => {
-        socketRef.current = io.connect("/");
-        navigator.mediaDevices.getUserMedia({ video: videoConstraints, audio: true }).then(stream => {
-            userVideo.current.srcObject = stream;
-            // console.log('Obj: ', userVideo.current.srcObject.getTracks());
-            // userVideo.current.srcObject.getTracks()[0].stop();
-            socketRef.current.emit("join room", roomID);
-            socketRef.current.on("all users", users => {
-                const peers = [];
-                users.forEach(userID => {
-                    const peer = createPeer(userID, socketRef.current.id, stream);
-                    peersRef.current.push({
-                        peerID: userID,
-                        peer,
-                    })
-                    peers.push({
-                        peerID: userID,
-                        peer,
-                    });
-                })
-                setPeers(peers);
-            })
-
-            socketRef.current.on("user joined", payload => {
-                const peer = addPeer(payload.signal, payload.callerID, stream);
-                peersRef.current.push({
-                    peerID: payload.callerID,
-                    peer,
-                })
-
-                const peerObj = {
-                    peerID: payload.callerID,
-                    peer,
-                };
-
-                setPeers([...peersRef.current]);
-
-            });
-
-            socketRef.current.on("receiving returned signal", payload => {
-                const item = peersRef.current.find(p => p.peerID === payload.id);
-                item.peer.signal(payload.signal);
-            });
-
-            socketRef.current.on("user left", id => {
-                const peerObj = peersRef.current.find(p => p.peerID === id);
-                if (peerObj) {
-                    peerObj.peer.destroy();
-                }
-                const peers = peersRef.current.filter(p => p.peerID !== id);
-                peersRef.current = peers;
-                setPeers(peers);
-            });
-        })
-    }, []);
-
-    function createPeer(userToSignal, callerID, stream) {
-        const peer = new Peer({
-            initiator: true,
-            trickle: false,
-            stream,
+  function getAllUsersEvent(stream) {
+    ee.on('getAllUsers', function (data) {
+      if (Array.isArray(data)) {
+        data.forEach((userId) => {
+          const peer = createPeer(userId, stream);
+          setPeers(new Map(peers.set(userId, peer)));
         });
+      }
+    });
+  }
 
-        peer.on("signal", signal => {
-            socketRef.current.emit("sending signal", { userToSignal, callerID, signal })
+  function addPeer(incomingSignal, callerID, stream) {
+    const peer = new Peer({
+      initiator: false,
+      trickle: false,
+      stream,
+    });
+
+    peer.on('signal', (signal) => {
+      wsInstance.send(
+        JSON.stringify({
+          event: 'returningSignal',
+          data: {
+            signal,
+            callerID,
+          },
         })
+      );
+    });
 
-        return peer;
-    }
+    peer.signal(incomingSignal);
 
-    function addPeer(incomingSignal, callerID, stream) {
-        const peer = new Peer({
-            initiator: false,
-            trickle: false,
-            stream,
+    return peer;
+  }
+
+  function createPeer(userToSignal, stream) {
+    const peer = new Peer({
+      initiator: true,
+      trickle: false,
+      stream,
+    });
+
+    peer.on('signal', (signal) => {
+      wsInstance.send(
+        JSON.stringify({
+          event: 'sendingSignal',
+          data: {
+            userToSignal,
+            signal,
+          },
         })
+      );
+    });
 
-        peer.on("signal", signal => {
-            socketRef.current.emit("returning signal", { signal, callerID })
-        })
+    return peer;
+  }
 
-        peer.signal(incomingSignal);
+  function userJoin(stream) {
+    ee.on('userJoinRoom', function (data) {
+      const peer = addPeer(data.signal, data.callerID, stream);
+      setPeers(new Map(peers.set(data.callerID, peer)));
+    });
+  }
 
-        return peer;
-    }
+  function receivingReturnedSignal() {
+    ee.on('receivingReturnedSignal', function (data) {
+      const peer = peers.get(data.id);
+      peer && peer.signal(data.signal);
+    });
+  }
 
-    return (
-        <Container>
-            <StyledVideo muted ref={userVideo} autoPlay playsInline />
-            {peers.map((peer, index) => {
-                return (
-                    <Video key={peer.peerID} peer={peer.peer} />
-                );
-            })}
-        </Container>
+  function userLeft() {
+    ee.on('userLeftRoom', function (data) {
+      if (peers.has(data)) {
+        peers.delete(data);
+        setPeers(new Map(peers));
+      }
+    });
+  }
+
+  useEffect(() => {
+    const ws = new WebSocket(
+      'wss://f87d-103-156-42-200.ngrok.io/voice-chat?boardId=12345'
     );
+
+    ws.onopen = function () {
+      ws.send(
+        JSON.stringify({
+          event: 'getAllUsers',
+        })
+      );
+
+      ws.onmessage = async function (event) {
+        const dataBlob = event.data;
+        if (dataBlob instanceof Blob) {
+          const data = await dataBlob.text().then((text) => JSON.parse(text));
+          ee.emit(data.event, data.data);
+        }
+      };
+    };
+
+    setWsInstance(ws);
+  }, []);
+
+  useEffect(() => {
+    if (wsInstance) {
+      navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
+        getAllUsersEvent(stream);
+        userJoin(stream);
+        receivingReturnedSignal();
+        userLeft();
+      });
+    }
+  }, [wsInstance]);
+
+  return (
+    <Container>
+      {[...peers.keys()].map((k) => (
+        <Audio key={k} peer={peers.get(k)} />
+      ))}
+    </Container>
+  );
 };
 
 export default Room;
